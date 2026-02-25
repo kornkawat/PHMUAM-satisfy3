@@ -1,0 +1,967 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import {
+  GraduationCap, Upload, FileText, Lock, LogOut, Filter, CheckSquare,
+  Eraser, Calendar, Layers, Users, Star, Trophy, Info, Shield, Plus,
+  Download, Edit, Trash2, ChevronLeft, ChevronRight, Sparkles, PieChart,
+  Database, Bot, Lightbulb, Target, TrendingUp
+} from 'lucide-react';
+
+export default function App() {
+  // --- States ---
+  const [scriptsLoaded, setScriptsLoaded] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingText, setLoadingText] = useState("กำลังโหลดไลบรารี...");
+  
+  const [rawData, setRawData] = useState([]);
+  const [selectedYears, setSelectedYears] = useState(new Set());
+  const [selectedTerms, setSelectedTerms] = useState(new Set());
+  
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+  
+  const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', body: '', icon: 'info' });
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  
+  const [dataModalOpen, setDataModalOpen] = useState(false);
+  const [editMode, setEditMode] = useState('add');
+  const [editFormData, setEditFormData] = useState({ year: '', term: '', respondent: '', scores: {} });
+  
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [aiPdfLoading, setAiPdfLoading] = useState(false);
+  
+  // AI States
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiReportContent, setAiReportContent] = useState("");
+  const [aiActionPlanLoading, setAiActionPlanLoading] = useState(false);
+  const [aiActionPlanContent, setAiActionPlanContent] = useState("");
+  
+  const fileInputRef = useRef(null);
+  
+  // Charts Refs
+  const pieCanvasRef = useRef(null);
+  const barCanvasRef = useRef(null);
+  const lineCanvasRef = useRef(null);
+  const chartsInstance = useRef({ pie: null, bar: null, line: null });
+
+  const defaultQuestions = useMemo(() => [
+    "1. ความชัดเจนในการอธิบายเนื้อหา", "2. การเตรียมความพร้อมในการสอน",
+    "3. การใช้สื่อประกอบการสอน", "4. การเปิดโอกาสให้ซักถาม",
+    "5. ความเหมาะสมของการวัดประเมินผล", "6. การตรงต่อเวลา",
+    "7. การประยุกต์ใช้ความรู้", "8. ความกระตือรือร้นในการสอน",
+    "9. การจัดบรรยากาศการเรียนรู้", "10. ความพึงพอใจโดยรวม"
+  ], []);
+
+  // --- Effects ---
+  useEffect(() => {
+    const scripts = [
+      'https://cdn.jsdelivr.net/npm/chart.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js',
+      'https://cdn.jsdelivr.net/npm/marked/marked.min.js'
+    ];
+
+    let loadedCount = 0;
+    const loadScript = (src) => {
+      return new Promise((resolve) => {
+        if (document.querySelector(`script[src="${src}"]`)) {
+          resolve();
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = resolve; 
+        document.head.appendChild(script);
+      });
+    };
+
+    Promise.all(scripts.map(loadScript)).then(() => {
+      setScriptsLoaded(true);
+      window.Chart.defaults.font.family = "'Prompt', sans-serif";
+    });
+  }, []);
+
+  useEffect(() => {
+    if (scriptsLoaded) {
+      fetchGoogleSheetData();
+    }
+  }, [scriptsLoaded]);
+
+  // Computed Data
+  const uniqueYears = useMemo(() => [...new Set(rawData.map(d => d.year))].sort((a,b)=>b-a), [rawData]);
+  const uniqueTerms = useMemo(() => [...new Set(rawData.map(d => d.term))].sort(), [rawData]);
+  
+  const uniqueQuestionsList = useMemo(() => {
+    const qSet = [...new Set(rawData.map(d => d.question))];
+    return qSet.length >= 10 ? qSet.slice(0, 10) : defaultQuestions;
+  }, [rawData, defaultQuestions]);
+
+  const filteredData = useMemo(() => {
+    return rawData.filter(d => selectedYears.has(d.year) && selectedTerms.has(d.term));
+  }, [rawData, selectedYears, selectedTerms]);
+
+  const adminDataList = useMemo(() => {
+    return [...filteredData].sort((a,b) => 
+      b.year.localeCompare(a.year) || 
+      a.term.localeCompare(b.term) || 
+      a.respondent.localeCompare(b.respondent)
+    );
+  }, [filteredData]);
+
+  useEffect(() => {
+    if (rawData.length > 0 && selectedYears.size === 0 && selectedTerms.size === 0) {
+      setSelectedYears(new Set(uniqueYears));
+      setSelectedTerms(new Set(uniqueTerms));
+    }
+  }, [rawData, uniqueYears, uniqueTerms]);
+
+  // Draw Charts Effect
+  useEffect(() => {
+    if (!scriptsLoaded || filteredData.length === 0) return;
+
+    Object.values(chartsInstance.current).forEach(chart => {
+      if (chart) chart.destroy();
+    });
+
+    const colors = ['#1e3a8a', '#10b981', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6', '#f43f5e', '#6366f1', '#84cc16'];
+
+    const questionStats = {};
+    const yearStats = {};
+    const termYearStats = {};
+
+    filteredData.forEach(d => {
+      if(!questionStats[d.question]) questionStats[d.question] = { sum: 0, count: 0 };
+      questionStats[d.question].sum += d.score;
+      questionStats[d.question].count++;
+
+      if(!yearStats[d.year]) yearStats[d.year] = { sum: 0, count: 0 };
+      yearStats[d.year].sum += d.score;
+      yearStats[d.year].count++;
+
+      if(!termYearStats[d.term]) termYearStats[d.term] = {};
+      if(!termYearStats[d.term][d.year]) termYearStats[d.term][d.year] = { sum: 0, count: 0 };
+      termYearStats[d.term][d.year].sum += d.score;
+      termYearStats[d.term][d.year].count++;
+    });
+
+    const qAverages = Object.keys(questionStats).map(q => ({
+      question: q, avg: questionStats[q].sum / questionStats[q].count
+    })).sort((a,b) => b.avg - a.avg);
+
+    // 1. Pie Chart
+    if (pieCanvasRef.current) {
+      const top10 = qAverages.slice(0, 10);
+      chartsInstance.current.pie = new window.Chart(pieCanvasRef.current, {
+        type: 'doughnut',
+        data: {
+          labels: top10.map(q => q.question.length > 25 ? q.question.substring(0, 25) + '...' : q.question),
+          datasets: [{ data: top10.map(q => q.avg), backgroundColor: colors, borderWidth: 2, hoverOffset: 10 }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+      });
+    }
+
+    // 2. Bar Chart
+    if (barCanvasRef.current) {
+      const sortedYears = Object.keys(yearStats).sort();
+      const yearAvgs = sortedYears.map(y => yearStats[y].sum / yearStats[y].count);
+      chartsInstance.current.bar = new window.Chart(barCanvasRef.current, {
+        type: 'bar',
+        data: {
+          labels: sortedYears,
+          datasets: [{ label: 'คะแนนเฉลี่ย', data: yearAvgs, backgroundColor: '#1e3a8a', borderRadius: 6 }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } }
+      });
+    }
+
+    // 3. Line Chart
+    if (lineCanvasRef.current) {
+      const sortedTerms = Object.keys(termYearStats).sort();
+      const sortedYears = Object.keys(yearStats).sort();
+      
+      const datasets = sortedYears.map((year, i) => {
+        const data = sortedTerms.map(term => {
+          const stat = termYearStats[term][year];
+          return stat ? stat.sum / stat.count : null;
+        });
+        const validData = data.filter(v => v !== null);
+        const maxVal = validData.length > 0 ? Math.max(...validData) : null;
+        const pointBgColors = data.map(v => (v !== null && v === maxVal) ? '#f43f5e' : colors[i % colors.length]);
+
+        return {
+          label: `ปี ${year}`, data: data, borderColor: colors[i % colors.length],
+          backgroundColor: colors[i % colors.length], pointBackgroundColor: pointBgColors,
+          pointBorderColor: '#ffffff', pointBorderWidth: 2, pointRadius: 5, tension: 0.3, borderWidth: 3
+        };
+      });
+
+      chartsInstance.current.line = new window.Chart(lineCanvasRef.current, {
+        type: 'line',
+        data: { labels: sortedTerms.map(t => `เทอม ${t}`), datasets: datasets },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } }
+      });
+    }
+
+  }, [filteredData, scriptsLoaded]);
+
+  // --- Core Functions ---
+  const showMessage = (body, title = 'แจ้งเตือน', icon = 'info') => {
+    setMessageModal({ isOpen: true, title, body, icon });
+  };
+
+  const processIncomingData = (data) => {
+    if (!data || data.length === 0) {
+      showMessage("ไม่พบข้อมูล หรือไฟล์ว่างเปล่า", "ไม่มีข้อมูล");
+      setLoading(false);
+      return;
+    }
+
+    const headers = Object.keys(data[0]);
+    const keys = {
+      year: headers.find(h => h.includes('ปี') || h.toLowerCase().includes('year')) || headers[0],
+      term: headers.find(h => h.includes('ภาค') || h.includes('เทอม') || h.toLowerCase().includes('term')) || headers[1],
+      question: headers.find(h => h.includes('ข้อ') || h.includes('คำถาม') || h.toLowerCase().includes('question')) || headers[2],
+      score: headers.find(h => h.includes('คะแนน') || h.includes('ระดับ') || h.toLowerCase().includes('score')) || headers[3],
+      respondent: headers.find(h => h.includes('ผู้ประเมิน') || h.includes('รหัส') || h.toLowerCase().includes('id') || h.toLowerCase().includes('timestamp')) || 'ID_Gen'
+    };
+
+    const processed = data.map((row, index) => {
+      let q = row[keys.question] ? String(row[keys.question]).trim() : '';
+      q = q.replace(/^0+([1-9])(\.|\s)/, '$1$2');
+      let s = parseFloat(row[keys.score]);
+      if (isNaN(s)) s = 0;
+      if (s > 5) s = 5; if (s < 1) s = 1;
+
+      return {
+        _id: Date.now() + index + Math.random(),
+        year: String(row[keys.year] || 'ไม่ระบุ').trim(),
+        term: String(row[keys.term] || 'ไม่ระบุ').trim(),
+        question: q, score: s,
+        respondent: row[keys.respondent] ? String(row[keys.respondent]).trim() : `ID_${Math.floor(index/10)}`
+      };
+    }).filter(r => r.question !== ''); 
+
+    setRawData(processed);
+    setLoading(false);
+  };
+
+  const fetchGoogleSheetData = () => {
+    setLoading(true);
+    setLoadingText("กำลังดึงข้อมูลจากระบบ...");
+    const url = `https://docs.google.com/spreadsheets/d/1GjvdDDN0Jqy3WtPkMkDpKLyti0Iejwmwsw3jNFdVq-g/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('ความพึงพอใจ (Reshape)')}`;
+    
+    window.Papa.parse(url, {
+      download: true, header: true, skipEmptyLines: true,
+      complete: (results) => processIncomingData(results.data),
+      error: (err) => {
+        console.error(err);
+        showMessage("ไม่สามารถดึงข้อมูลอัตโนมัติจากระบบได้ กรุณาใช้ปุ่ม 'นำเข้า'", "ข้อผิดพลาด");
+        setLoading(false);
+      }
+    });
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    setLoading(true); setLoadingText("กำลังนำเข้าข้อมูล...");
+    const format = document.getElementById('importFormat').value;
+    
+    if (format === 'csv' || file.name.endsWith('.csv')) {
+      window.Papa.parse(file, { header: true, skipEmptyLines: true, complete: (results) => processIncomingData(results.data) });
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const data = new Uint8Array(e.target.result);
+        const workbook = window.XLSX.read(data, {type: 'array'});
+        const json = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+        processIncomingData(json);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  const attemptLogin = () => {
+    if(loginForm.username === 'admin' && loginForm.password === 'admin') {
+      setIsAdmin(true); setLoginModalOpen(false);
+      showMessage("เข้าสู่ระบบผู้ดูแลเรียบร้อยแล้ว", "สำเร็จ", "success");
+    } else {
+      showMessage("ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง", "ล้มเหลว", "error");
+    }
+    setLoginForm({ username: '', password: '' });
+  };
+
+  const toggleFilter = (type, value) => {
+    const set = type === 'year' ? selectedYears : selectedTerms;
+    const next = new Set(set);
+    if (next.has(value)) next.delete(value); else next.add(value);
+    if (type === 'year') setSelectedYears(next); else setSelectedTerms(next);
+    setCurrentPage(1);
+  };
+
+  const saveEditData = () => {
+    if(!editFormData.year || !editFormData.term) { 
+      showMessage("กรุณากรอกข้อมูลให้ครบถ้วน"); return; 
+    }
+
+    const respondentId = editMode === 'edit' ? editFormData.respondent : `USER_${Date.now().toString().slice(-6)}`;
+    let newRaw = [...rawData];
+
+    if (editMode === 'edit') {
+      newRaw = newRaw.filter(d => !(d.year === editFormData.year && d.term === editFormData.term && d.respondent === respondentId));
+    }
+
+    const newEntries = uniqueQuestionsList.map(q => ({
+      _id: Date.now() + Math.random(),
+      year: editFormData.year, term: editFormData.term, question: q,
+      score: editFormData.scores[q] || 5, respondent: respondentId
+    }));
+
+    setRawData([...newRaw, ...newEntries]);
+    setDataModalOpen(false);
+    showMessage("บันทึกข้อมูลสำเร็จ", "สำเร็จ", "success");
+  };
+
+  const deleteSingleRecord = (id) => {
+    if(window.confirm("คุณแน่ใจหรือไม่ที่จะลบคำตอบข้อนี้?")) {
+      setRawData(rawData.filter(d => String(d._id) !== String(id)));
+    }
+  };
+
+  const openEditModal = (year, term, respondent) => {
+    const rData = filteredData.filter(d => d.year === year && d.term === term && d.respondent === respondent);
+    const scores = {};
+    rData.forEach(d => scores[d.question] = d.score);
+    
+    setEditMode('edit');
+    setEditFormData({ year, term, respondent, scores });
+    setDataModalOpen(true);
+  };
+
+  const openAddModal = () => {
+    setEditMode('add');
+    setEditFormData({ year: uniqueYears[0] || '2566', term: uniqueTerms[0] || '1', respondent: '', scores: {} });
+    setDataModalOpen(true);
+  };
+
+  const exportData = () => {
+    const format = document.getElementById('exportFormat').value;
+    if (filteredData.length === 0) return;
+
+    const exportArr = filteredData.map(d => ({ 'ปีการศึกษา': d.year, 'ภาคเรียน': d.term, 'รหัสผู้ประเมิน': d.respondent, 'หัวข้อคำถาม': d.question, 'คะแนน': d.score }));
+
+    if (format === 'csv') {
+      const csv = window.Papa.unparse(exportArr);
+      const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob); link.download = `MU_Evaluation_${Date.now()}.csv`; link.click();
+    } else {
+      const worksheet = window.XLSX.utils.json_to_sheet(exportArr);
+      const workbook = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(workbook, worksheet, "Evaluation_Data");
+      window.XLSX.writeFile(workbook, `MU_Evaluation_${Date.now()}.xlsx`);
+    }
+  };
+
+  // --- Export Dashboard PDF ---
+  const exportToPDF = async () => {
+    if (!window.html2pdf) {
+      showMessage("ระบบโหลดไลบรารี PDF ยังไม่เสร็จสิ้น กรุณารอสักครู่");
+      return;
+    }
+    setPdfLoading(true);
+    
+    try {
+      const content = document.getElementById('dashboardContent');
+      if (!content) throw new Error("ไม่พบเนื้อหาที่ต้องการสร้าง PDF");
+      
+      const opt = {
+        margin:       10, 
+        filename:     `MU_Evaluation_Dashboard_${Date.now()}.pdf`,
+        image:        { type: 'jpeg', quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true, backgroundColor: '#f8fafc' },
+        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak:    { mode: ['avoid-all', 'css', 'legacy'] }
+      };
+
+      await window.html2pdf().set(opt).from(content).save();
+    } catch (error) {
+      console.error("PDF Export Error: ", error);
+      showMessage("ไม่สามารถสร้าง PDF ได้: " + error.message);
+    } finally { 
+      setPdfLoading(false); 
+    }
+  };
+
+  // --- Gemini API Call Wrapper ---
+  const callGeminiAPI = async (prompt, systemInstruction = null) => {
+    const apiKey = ""; 
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }]
+    };
+    
+    if (systemInstruction) {
+      payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+    }
+
+    const retries = [1000, 2000, 4000, 8000, 16000];
+    
+    for (let i = 0; i <= retries.length; i++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      } catch (error) {
+        if (i === retries.length) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, retries[i])); 
+      }
+    }
+  };
+
+  // --- Gemini AI Features ---
+
+  const generateAIReport = async () => {
+    if(filteredData.length === 0) { showMessage("กรุณานำเข้าข้อมูลก่อน"); return; }
+    
+    setAiLoading(true); 
+    setAiReportContent("กำลังประมวลผล Executive Report...");
+    
+    const totalResp = Math.ceil(filteredData.length / 10);
+    const avgScore = (filteredData.reduce((s,d)=>s+d.score,0)/filteredData.length).toFixed(2);
+    
+    const qStats = {};
+    filteredData.forEach(d => { if(!qStats[d.question]) qStats[d.question]={sum:0,count:0}; qStats[d.question].sum+=d.score; qStats[d.question].count++; });
+    const topQ = Object.keys(qStats).reduce((a,b) => (qStats[a].sum/qStats[a].count > qStats[b].sum/qStats[b].count) ? a : b);
+    const bottomQ = Object.keys(qStats).reduce((a,b) => (qStats[a].sum/qStats[a].count < qStats[b].sum/qStats[b].count) ? a : b);
+
+    const promptText = `
+      ข้อมูลสถิติการประเมินการจัดการเรียนการสอนของรายวิชานี้ (คะแนนเต็ม 5):
+      - จำนวนนักศึกษาที่ตอบแบบประเมิน: ${totalResp} คน
+      - คะแนนเฉลี่ยรวม: ${avgScore} คะแนน
+      - หัวข้อที่ได้คะแนนสูงสุด: "${topQ}"
+      - หัวข้อที่ได้คะแนนต่ำสุด: "${bottomQ}"
+      - ปีการศึกษา: ${Array.from(selectedYears).join(', ')} 
+      - ภาคเรียน: ${Array.from(selectedTerms).join(', ')}
+
+      ในฐานะ "อาจารย์ผู้สอน" กรุณาเขียน Executive Report เพื่อนำเสนอต่อผู้บริหาร (เช่น คณบดี หรือ หัวหน้าภาควิชา)
+      โดยให้ใช้ภาษาทางการ สุภาพ ชัดเจน และเป็นมืออาชีพ มีโครงสร้างดังนี้ (เขียนโดยใช้ Markdown format):
+
+      เรียน ผู้บริหาร / คณบดี,
+
+      **1. สรุปภาพรวมผลการประเมิน (Executive Summary)**
+      [อธิบายและวิเคราะห์ภาพรวมจากคะแนนที่ได้รับ]
+
+      **2. จุดแข็งและปัจจัยแห่งความสำเร็จ (Strengths & Success Factors)**
+      [อธิบายถึงหัวข้อที่ได้คะแนนสูงสุด และสิ่งที่ทำได้ดีในภาคเรียนนี้]
+
+      **3. ปัญหา อุปสรรค และข้อเสนอแนะเพื่อการพัฒนา (Areas for Improvement & Action Plan)**
+      [อธิบายถึงหัวข้อที่ได้คะแนนต่ำสุด พร้อมเสนอแนวทางหรือแผนการปรับปรุงการสอนของตนเองในภาคเรียนถัดไปอย่างเป็นรูปธรรม ให้ดูมีความตั้งใจในการแก้ปัญหา]
+
+      จึงเรียนมาเพื่อโปรดพิจารณา
+    `;
+
+    try {
+      const text = await callGeminiAPI(
+        promptText, 
+        "คุณคืออาจารย์มหาวิทยาลัยที่มีความมุ่งมั่นในการพัฒนาการสอน เขียน Executive Report เพื่อสรุปผลการประเมินให้น่าเชื่อถือ ชัดเจน และแสดงให้เห็นถึงความใส่ใจในการนำผลประเมินไปแก้ปัญหาอย่างเป็นรูปธรรม"
+      );
+      setAiReportContent(window.marked.parse(text));
+    } catch (err) {
+      setAiReportContent(`<div class="text-rose-500 font-bold p-4 bg-rose-50 rounded-lg">เกิดข้อผิดพลาดในการเรียกใช้ AI: ${err.message}</div>`);
+    } finally { 
+      setAiLoading(false); 
+    }
+  };
+
+  const generateActionPlan = async () => {
+    if(filteredData.length === 0) { showMessage("กรุณานำเข้าข้อมูลก่อน"); return; }
+    
+    setAiActionPlanLoading(true);
+    setAiActionPlanContent("กำลังสร้างแผนปฏิบัติการ...");
+
+    const qStats = {};
+    filteredData.forEach(d => { 
+      if(!qStats[d.question]) qStats[d.question]={sum:0,count:0}; 
+      qStats[d.question].sum += d.score; 
+      qStats[d.question].count++; 
+    });
+    
+    const sortedQuestions = Object.keys(qStats).map(q => ({
+      question: q,
+      avg: (qStats[q].sum / qStats[q].count).toFixed(2)
+    })).sort((a,b) => a.avg - b.avg);
+
+    const bottom3 = sortedQuestions.slice(0, 3);
+    const bottomText = bottom3.map(q => `- ${q.question} (คะแนนเฉลี่ย: ${q.avg}/5)`).join('\n');
+
+    const promptText = `
+      จากผลการประเมินการสอนล่าสุด พบว่าหัวข้อต่อไปนี้ได้คะแนนต่ำที่สุด:
+      ${bottomText}
+
+      โปรดสร้าง "แผนปฏิบัติการอัจฉริยะ (Action Plan)" สำหรับคณาจารย์ เพื่อนำไปปรับปรุงการสอนในเทอมถัดไป
+      โดยให้คำแนะนำที่เป็นรูปธรรม ทำได้จริง (Actionable) แบ่งเป็นข้อๆ พร้อมยกตัวอย่างกิจกรรมหรือเครื่องมือที่สามารถนำมาใช้ได้
+    `;
+
+    try {
+      const text = await callGeminiAPI(
+        promptText,
+        "คุณคือที่ปรึกษาด้านนวัตกรรมการศึกษา (Educational Consultant) ให้คำแนะนำที่สร้างสรรค์ ทันสมัย (เช่น การใช้ EdTech) และสามารถนำไปปฏิบัติได้จริงในห้องเรียนระดับมหาวิทยาลัย"
+      );
+      setAiActionPlanContent(window.marked.parse(text));
+    } catch (err) {
+      setAiActionPlanContent(`<div class="text-rose-500 font-bold p-4 bg-rose-50 rounded-lg">เกิดข้อผิดพลาด: ${err.message}</div>`);
+    } finally {
+      setAiActionPlanLoading(false);
+    }
+  };
+
+  const exportAIReportToWord = () => {
+    if(!aiReportContent) return;
+    const header = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+      <head>
+        <meta charset='utf-8'>
+        <title>Executive Report</title>
+        <style>
+          body { font-family: 'Sarabun', 'TH Sarabun New', Tahoma, sans-serif; font-size: 16pt; color: #000; text-align: justify; }
+          h1, h2, h3 { color: #1e3a8a; font-weight: bold; }
+          p { line-height: 1.5; margin-bottom: 12px; }
+          strong { font-weight: bold; }
+        </style>
+      </head>
+      <body>
+    `;
+    const footer = "</body></html>";
+    
+    const html = header + aiReportContent + footer;
+    
+    const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Executive_Report_${Date.now()}.doc`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // --- Export AI Report PDF (Formatted) ---
+  const exportAIReportToPDF = async () => {
+    if(!aiReportContent) return;
+    if (!window.html2pdf) {
+      showMessage("ระบบโหลดไลบรารี PDF ยังไม่เสร็จสิ้น กรุณารอสักครู่");
+      return;
+    }
+    
+    setAiPdfLoading(true);
+
+    try {
+      const wrapperDiv = document.getElementById('ai-report-content-wrapper');
+      if(!wrapperDiv) return;
+
+      // บันทึกสไตล์เดิมเอาไว้
+      const originalMaxHeight = wrapperDiv.style.maxHeight;
+      const originalOverflow = wrapperDiv.style.overflow;
+      const originalPadding = wrapperDiv.style.padding;
+      const originalBg = wrapperDiv.style.backgroundColor;
+      
+      // ปรับสไตล์ชั่วคราวเพื่อให้จับภาพได้ครบทั้งหมด และเว้นระยะขอบไม่ให้ตกขอบ
+      wrapperDiv.style.maxHeight = 'none';
+      wrapperDiv.style.overflow = 'visible';
+      wrapperDiv.style.padding = '30px 40px'; // เว้นซ้ายขวาเพิ่มป้องกันการตกขอบ
+      wrapperDiv.style.backgroundColor = '#ffffff';
+      
+      // ให้เวลา Render หน้าใหม่เพื่อซ่อน Scrollbar ก่อนจับภาพ
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      const opt = {
+        margin:       [15, 15, 15, 15], // ขอบ บน ขวา ล่าง ซ้าย
+        filename:     `Executive_Report_${Date.now()}.pdf`,
+        image:        { type: 'jpeg', quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollY: 0 },
+        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak:    { mode: ['avoid-all', 'css', 'legacy'] }
+      };
+
+      await window.html2pdf().set(opt).from(wrapperDiv).save();
+
+      // คืนค่ารูปแบบเดิม
+      wrapperDiv.style.maxHeight = originalMaxHeight;
+      wrapperDiv.style.overflow = originalOverflow;
+      wrapperDiv.style.padding = originalPadding;
+      wrapperDiv.style.backgroundColor = originalBg;
+    } catch (error) {
+      console.error("PDF Export Error: ", error);
+      showMessage("ไม่สามารถสร้าง PDF ได้ ลองอีกครั้ง");
+    } finally {
+      setAiPdfLoading(false);
+    }
+  };
+
+  // KPIs
+  const respondents = Math.ceil(filteredData.length / 10);
+  const totalScore = filteredData.reduce((sum, d) => sum + d.score, 0);
+  const avgScore = filteredData.length > 0 ? (totalScore / filteredData.length).toFixed(2) : "0.00";
+  
+  let topQuestion = '-'; let topAvg = 0;
+  if(filteredData.length > 0) {
+    const qStats = {};
+    filteredData.forEach(d => { if(!qStats[d.question]) qStats[d.question]={sum:0,count:0}; qStats[d.question].sum+=d.score; qStats[d.question].count++; });
+    for(const q in qStats) { const a = qStats[q].sum/qStats[q].count; if(a>topAvg) {topAvg=a; topQuestion=q;} }
+  }
+
+  // --- จัด Format สำหรับเนื้อหา (Prose) ไม่ให้ตกขอบ และให้ดูสวยงาม ---
+  const globalStyles = `
+    @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Prompt', sans-serif; background-color: #f8fafc; margin: 0; }
+    .glass-card { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); border: 1px solid #e2e8f0; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #1e3a8a; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    
+    /* สไตล์เฉพาะส่วนเนื้อหา AI ป้องกันข้อความตกขอบและจัดให้สวยงาม */
+    .prose { 
+      max-width: 100%; 
+      word-wrap: break-word; 
+      overflow-wrap: break-word; 
+      word-break: break-word; /* บังคับตัดคำยาวๆ ไม่ให้ล้น */
+    }
+    .prose h2 { color: #1e3a8a; font-size: 1.25rem; font-weight: 700; margin-top: 1.5em; margin-bottom: 0.75em; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.3em; }
+    .prose h3 { color: #3b82f6; font-size: 1.1rem; font-weight: 600; margin-top: 1.2em; margin-bottom: 0.5em; }
+    .prose p { margin-bottom: 1em; line-height: 1.8; color: #334155; text-align: justify; text-justify: inter-word; }
+    .prose ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; color: #334155; }
+    .prose li { margin-bottom: 0.5em; line-height: 1.6; text-align: justify; }
+    .prose strong { color: #0f172a; font-weight: 600; }
+    .prose table { width: 100%; border-collapse: collapse; margin-bottom: 1em; display: block; overflow-x: auto; }
+    .prose th, .prose td { border: 1px solid #e2e8f0; padding: 0.5em; }
+
+    /* Custom Scrollbar for better look */
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  `;
+
+  return (
+    <div className="min-h-screen flex flex-col text-slate-800">
+      <style dangerouslySetInnerHTML={{ __html: globalStyles }} />
+      
+      {/* Loading Overlay */}
+      {loading && (
+        <div className="fixed inset-0 bg-white/90 z-50 flex flex-col items-center justify-center backdrop-blur-sm">
+          <div className="loader mb-4"></div>
+          <h2 className="text-blue-900 font-semibold text-xl">{loadingText}</h2>
+        </div>
+      )}
+
+      {/* Message Modal */}
+      {messageModal.isOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl text-center">
+            <div className={`text-4xl mb-4 flex justify-center ${messageModal.icon === 'error' ? 'text-red-500' : 'text-blue-900'}`}>
+              <Info className="w-12 h-12" />
+            </div>
+            <h2 className="text-xl font-bold mb-2">{messageModal.title}</h2>
+            <p className="text-slate-600 mb-6">{messageModal.body}</p>
+            <button onClick={() => setMessageModal({...messageModal, isOpen: false})} className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 w-full font-medium">ตกลง</button>
+          </div>
+        </div>
+      )}
+
+      {/* Login Modal */}
+      {loginModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-8 max-w-sm w-full shadow-2xl">
+            <div className="text-center mb-6">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 text-blue-900 mb-4"><Shield className="w-8 h-8" /></div>
+              <h2 className="text-2xl font-bold text-blue-900">เข้าสู่ระบบผู้ดูแล</h2>
+            </div>
+            <div className="space-y-4">
+              <input type="text" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} className="w-full px-4 py-2 border rounded-lg" placeholder="ชื่อผู้ใช้งาน (admin)" />
+              <input type="password" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} className="w-full px-4 py-2 border rounded-lg" placeholder="รหัสผ่าน (admin)" />
+              <div className="pt-4 flex gap-3">
+                <button onClick={() => setLoginModalOpen(false)} className="flex-1 px-4 py-2 bg-slate-100 rounded-lg">ยกเลิก</button>
+                <button onClick={attemptLogin} className="flex-1 px-4 py-2 bg-blue-900 text-white rounded-lg">เข้าสู่ระบบ</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Data Modal */}
+      {dataModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-8 max-w-2xl w-full shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <h2 className="text-2xl font-bold text-blue-900 mb-6 border-b pb-3">{editMode === 'add' ? 'เพิ่มข้อมูลใหม่' : 'แก้ไขข้อมูล'}</h2>
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-sm mb-1">ปีการศึกษา</label>
+                <input type="text" disabled={editMode === 'edit'} value={editFormData.year} onChange={e => setEditFormData({...editFormData, year: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-sm mb-1">ภาคเรียน</label>
+                <input type="text" disabled={editMode === 'edit'} value={editFormData.term} onChange={e => setEditFormData({...editFormData, term: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+              </div>
+            </div>
+            <div className="space-y-4 bg-slate-50 p-4 rounded-xl border">
+              {uniqueQuestionsList.map(q => (
+                <div key={q} className="flex flex-col sm:flex-row justify-between py-2 border-b last:border-0">
+                  <label className="text-sm w-full sm:w-2/3 pr-2">{q}</label>
+                  <input type="number" min="1" max="5" step="0.5" value={editFormData.scores[q] || 5} onChange={e => setEditFormData({...editFormData, scores: {...editFormData.scores, [q]: e.target.value}})} className="w-24 px-3 py-1 border rounded text-center" />
+                </div>
+              ))}
+            </div>
+            <div className="pt-6 mt-6 border-t flex gap-3">
+              <button onClick={() => setDataModalOpen(false)} className="flex-1 py-2 bg-slate-100 rounded-lg">ยกเลิก</button>
+              <button onClick={saveEditData} className="flex-1 py-2 bg-emerald-500 text-white rounded-lg">บันทึกข้อมูล</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Navigation */}
+      <nav className="bg-slate-900 text-white shadow-xl sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col lg:flex-row justify-between items-center">
+          <div className="flex items-center mb-3 lg:mb-0">
+            <div className="p-2 bg-emerald-100/20 rounded-lg mr-3"><GraduationCap className="text-emerald-100 w-6 h-6" /></div>
+            <span className="font-bold text-lg tracking-wide text-emerald-100 drop-shadow-md">MU<span className="text-white"> EVALUATION</span></span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center bg-white/10 rounded-lg p-1">
+              <select id="importFormat" className="bg-transparent text-white text-sm outline-none px-2 cursor-pointer"><option value="excel" className="text-slate-800">Excel</option><option value="csv" className="text-slate-800">CSV</option></select>
+              <input type="file" ref={fileInputRef} className="hidden" accept=".csv, .xlsx, .xls" onChange={handleFileUpload} />
+              <button onClick={() => fileInputRef.current?.click()} className="px-3 py-1.5 rounded bg-white/20 hover:bg-white/30 text-sm font-medium flex items-center"><Upload className="w-4 h-4 mr-2 text-emerald-100"/> นำเข้า</button>
+            </div>
+            <button onClick={exportToPDF} disabled={pdfLoading} className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-sm font-bold flex items-center shadow-lg transition-colors">
+              <FileText className="w-4 h-4 mr-2" /> {pdfLoading ? 'กำลังสร้าง...' : 'Export A4'}
+            </button>
+            {!isAdmin ? (
+              <button onClick={() => setLoginModalOpen(true)} className="px-4 py-2 rounded-lg border border-emerald-100/50 text-emerald-100 hover:bg-emerald-100 hover:text-slate-900 text-sm font-medium flex items-center transition-colors"><Lock className="w-4 h-4 mr-2"/> Admin</button>
+            ) : (
+              <button onClick={() => setIsAdmin(false)} className="px-4 py-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-sm font-medium flex items-center transition-colors"><LogOut className="w-4 h-4 mr-2"/> ออกจากระบบ</button>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <div id="dashboardContent" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow w-full bg-slate-50">
+        
+        {/* Banner */}
+        <div className="mb-8 text-center bg-gradient-to-r from-slate-900 via-blue-900 to-blue-800 rounded-3xl p-8 md:p-10 shadow-xl text-white relative overflow-hidden">
+          <h1 className="text-2xl md:text-4xl font-bold mb-3 relative z-10 drop-shadow-lg leading-tight">รายงานผลประเมินการจัดการเรียนการสอน</h1>
+          <p className="text-emerald-100 text-base md:text-xl font-light relative z-10">หลักสูตรสาธารณสุขศาสตรบัณฑิต โครงการจัดตั้งวิทยาเขตอำนาจเจริญ มหาวิทยาลัยมหิดล</p>
+        </div>
+
+        {/* Filters */}
+        <div className="glass-card rounded-2xl p-6 mb-8 border-t-4 border-t-blue-900" data-html2canvas-ignore="true">
+          <div className="flex flex-col md:flex-row justify-between items-center mb-5 border-b pb-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center"><div className="p-2 bg-blue-100 rounded-lg mr-3 text-blue-900"><Filter className="w-5 h-5"/></div> ตัวกรองข้อมูล</h3>
+            <div className="space-x-2 mt-4 md:mt-0 flex">
+              <button onClick={() => { setSelectedYears(new Set(uniqueYears)); setSelectedTerms(new Set(uniqueTerms)); }} className="px-4 py-2 text-xs font-semibold bg-blue-900 text-white rounded-lg hover:bg-blue-800 shadow-md flex items-center"><CheckSquare className="w-4 h-4 mr-1"/> เลือกทั้งหมด</button>
+              <button onClick={() => { setSelectedYears(new Set()); setSelectedTerms(new Set()); }} className="px-4 py-2 text-xs font-semibold bg-white border text-slate-700 rounded-lg hover:bg-slate-50 flex items-center"><Eraser className="w-4 h-4 mr-1"/> ล้างตัวกรอง</button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="bg-slate-50 p-4 rounded-xl border">
+              <h4 className="font-bold text-blue-900 mb-4 text-sm flex items-center"><Calendar className="w-4 h-4 mr-2"/> ปีการศึกษา</h4>
+              <div className="flex flex-wrap gap-4">
+                {uniqueYears.map(y => (
+                  <label key={`y-${y}`} className="flex items-center cursor-pointer">
+                    <input type="checkbox" checked={selectedYears.has(y)} onChange={() => toggleFilter('year', y)} className="mr-2 w-4 h-4 text-blue-900 rounded" />
+                    <span className="text-sm font-medium">{y}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-xl border">
+              <h4 className="font-bold text-blue-900 mb-4 text-sm flex items-center"><Layers className="w-4 h-4 mr-2"/> ภาคเรียน</h4>
+              <div className="flex flex-wrap gap-4">
+                {uniqueTerms.map(t => (
+                  <label key={`t-${t}`} className="flex items-center cursor-pointer">
+                    <input type="checkbox" checked={selectedTerms.has(t)} onChange={() => toggleFilter('term', t)} className="mr-2 w-4 h-4 text-blue-900 rounded" />
+                    <span className="text-sm font-medium">เทอม {t}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* KPIs */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div className="glass-card rounded-2xl p-6 relative overflow-hidden group">
+            <div className="absolute -right-6 -top-6 text-blue-50 opacity-50"><Users className="w-32 h-32" /></div>
+            <div className="relative z-10">
+              <div className="flex items-center mb-2"><div className="w-10 h-10 rounded-full bg-blue-100 text-blue-900 flex items-center justify-center mr-3"><Users className="w-5 h-5"/></div><p className="text-sm text-slate-600 font-semibold">จำนวนผู้ตอบแบบประเมินรวม</p></div>
+              <div className="flex items-end mt-4"><h2 className="text-4xl font-bold text-slate-900">{respondents.toLocaleString()}</h2><span className="text-sm text-slate-500 ml-2 mb-1">คน</span></div>
+            </div>
+          </div>
+          <div className="glass-card rounded-2xl p-6 relative overflow-hidden group">
+            <div className="absolute -right-6 -top-6 text-emerald-50 opacity-50"><Star className="w-32 h-32" /></div>
+            <div className="relative z-10">
+              <div className="flex items-center mb-2"><div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-50 flex items-center justify-center mr-3"><PieChart className="w-5 h-5"/></div><p className="text-sm text-slate-600 font-semibold">ความพึงพอใจเฉลี่ย (1-5)</p></div>
+              <div className="flex items-end mt-4"><h2 className="text-4xl font-bold text-slate-900">{avgScore}</h2><span className="text-sm text-slate-500 ml-2 mb-1">คะแนน</span></div>
+            </div>
+          </div>
+          <div className="glass-card rounded-2xl p-6 relative overflow-hidden group">
+            <div className="absolute -right-6 -top-6 text-amber-50 opacity-50"><Trophy className="w-32 h-32" /></div>
+            <div className="relative z-10">
+              <div className="flex items-center mb-2"><div className="w-10 h-10 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mr-3"><Trophy className="w-5 h-5"/></div><p className="text-sm text-slate-600 font-semibold">หัวข้อที่ได้คะแนนสูงสุด</p></div>
+              <div className="mt-3"><h2 className="text-base font-bold text-slate-900 leading-tight line-clamp-2" title={topQuestion}>{topQuestion}</h2><div className="inline-block mt-2 px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-sm font-bold shadow-sm">เฉลี่ย {topAvg.toFixed(2)}</div></div>
+            </div>
+          </div>
+        </div>
+
+        {/* Charts */}
+        <div className="glass-card rounded-2xl p-6 mb-8 flex flex-col items-center">
+          <h3 className="text-lg font-bold text-blue-900 mb-1 w-full text-center">เปรียบเทียบความพึงพอใจเฉลี่ยรายปีการศึกษา</h3>
+          <p className="text-xs text-slate-500 mb-6 w-full text-center">แสดงค่าเฉลี่ยรวมทุกภาคเรียนในแต่ละปี</p>
+          <div className="w-full relative min-h-[300px]"><canvas ref={barCanvasRef}></canvas></div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+          <div className="glass-card rounded-2xl p-6 flex flex-col items-center">
+            <h3 className="text-lg font-bold text-blue-900 mb-1 w-full text-center">คะแนนประเมินรายหัวข้อ</h3>
+            <p className="text-xs text-slate-500 mb-6 w-full text-center">(แสดง 10 ด้าน เรียงจากมากไปน้อย)</p>
+            <div className="w-full relative flex-grow min-h-[350px]"><canvas ref={pieCanvasRef}></canvas></div>
+          </div>
+          <div className="glass-card rounded-2xl p-6 flex flex-col">
+            <h3 className="text-lg font-bold text-blue-900 mb-1 text-center">เปรียบเทียบความพึงพอใจเฉลี่ยรายภาคเรียน</h3>
+            <p className="text-xs text-slate-500 mb-6 text-center">จำแนกตามปีการศึกษา <span className="text-rose-500 font-bold">(จุดสีแดง = ค่าเฉลี่ยสูงสุด)</span></p>
+            <div className="w-full relative flex-grow min-h-[350px]"><canvas ref={lineCanvasRef}></canvas></div>
+          </div>
+        </div>
+
+        {/* ✨ AI Section ✨ */}
+        <div className="mb-8" data-html2canvas-ignore="true">
+          
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            {/* 1. Executive Report */}
+            <div className="glass-card rounded-2xl p-6 border-t-4 border-t-purple-500 flex flex-col">
+              <div className="flex items-center mb-4">
+                <div className="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center mr-3"><TrendingUp className="w-5 h-5"/></div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">Executive Report</h3>
+                  <p className="text-xs text-slate-500">ร่างรายงานทางการวิเคราะห์ภาพรวมและแนวทางแก้ไข</p>
+                </div>
+              </div>
+              <button onClick={generateAIReport} disabled={aiLoading} className="w-full py-2.5 mb-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-lg font-medium shadow-md flex justify-center items-center transition-all">
+                <Sparkles className="w-4 h-4 mr-2" /> {aiLoading ? 'กำลังร่าง Executive Report...' : 'สร้าง Executive Report ✨'}
+              </button>
+              
+              {aiReportContent && (
+                <div className="flex flex-col flex-grow">
+                  <div className="bg-slate-50 rounded-xl border mb-4 relative overflow-hidden flex flex-col h-[400px]">
+                    <div id="ai-report-content-wrapper" className="p-6 overflow-y-auto custom-scrollbar bg-slate-50 h-full">
+                      <div className="prose prose-sm text-slate-700" dangerouslySetInnerHTML={{ __html: aiReportContent }} />
+                    </div>
+                  </div>
+                  
+                  {/* Export Buttons for AI Report */}
+                  <div className="flex gap-3 mt-auto">
+                    <button onClick={exportAIReportToWord} className="flex-1 py-2 bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 rounded-lg text-sm font-semibold flex items-center justify-center transition-colors">
+                      <Download className="w-4 h-4 mr-2" /> Export เป็น Word
+                    </button>
+                    <button onClick={exportAIReportToPDF} disabled={aiPdfLoading} className="flex-1 py-2 bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 rounded-lg text-sm font-semibold flex items-center justify-center transition-colors">
+                      <Download className="w-4 h-4 mr-2" /> {aiPdfLoading ? 'กำลังประมวลผล...' : 'Export เป็น PDF'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 2. Action Plan Generator */}
+            <div className="glass-card rounded-2xl p-6 border-t-4 border-t-indigo-500 flex flex-col">
+              <div className="flex items-center mb-4">
+                <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center mr-3"><Target className="w-5 h-5"/></div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">แผนปฏิบัติการอัจฉริยะ (Action Plan)</h3>
+                  <p className="text-xs text-slate-500">เสนอแนวทางพัฒนารูปแบบการสอนที่เป็นรูปธรรม</p>
+                </div>
+              </div>
+              <button onClick={generateActionPlan} disabled={aiActionPlanLoading} className="w-full py-2.5 mb-4 bg-gradient-to-r from-indigo-500 to-blue-600 hover:from-indigo-600 hover:to-blue-700 text-white rounded-lg font-medium shadow-md flex justify-center items-center transition-all">
+                <Lightbulb className="w-4 h-4 mr-2" /> {aiActionPlanLoading ? 'กำลังออกแบบกิจกรรม...' : 'สร้างแนวทางพัฒนาการสอน ✨'}
+              </button>
+              
+              {aiActionPlanContent && (
+                <div className="bg-slate-50 p-6 rounded-xl border flex-grow overflow-y-auto h-[400px] custom-scrollbar">
+                  <div className="prose prose-sm text-slate-700" dangerouslySetInnerHTML={{ __html: aiActionPlanContent }} />
+                </div>
+              )}
+            </div>
+
+          </div>
+        </div>
+
+        {/* Admin Area */}
+        {isAdmin && (
+          <div className="glass-card rounded-2xl p-8 mb-8 border-t-4 border-t-emerald-500" data-html2canvas-ignore="true">
+            <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4 border-b pb-4">
+              <h3 className="text-xl font-bold text-slate-900 flex items-center"><div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-500 flex items-center justify-center mr-3"><Database className="w-6 h-6"/></div> จัดการข้อมูล (Admin)</h3>
+              <div className="flex flex-wrap gap-2">
+                <div className="flex items-center bg-slate-100 rounded-lg p-1 border">
+                  <select id="exportFormat" className="bg-transparent text-sm outline-none px-2"><option value="excel">Excel</option><option value="csv">CSV</option></select>
+                  <button onClick={exportData} className="px-4 py-1.5 bg-slate-800 text-white rounded flex items-center text-sm"><Download className="w-4 h-4 mr-2"/> Export</button>
+                </div>
+                <button onClick={openAddModal} className="px-5 py-2 bg-emerald-500 text-white rounded-lg flex items-center text-sm shadow-md"><Plus className="w-4 h-4 mr-2"/> เพิ่มข้อมูล</button>
+              </div>
+            </div>
+            <div className="overflow-x-auto rounded-xl border shadow-sm custom-scrollbar">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-100">
+                  <tr>
+                    <th className="px-5 py-4 text-left font-bold">ปี/เทอม</th>
+                    <th className="px-5 py-4 text-left font-bold">รหัสผู้ประเมิน</th>
+                    <th className="px-5 py-4 text-left font-bold w-1/3">ข้อคำถาม</th>
+                    <th className="px-5 py-4 text-center font-bold">คะแนน</th>
+                    <th className="px-5 py-4 text-center font-bold">จัดการ</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-slate-100">
+                  {adminDataList.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map(row => (
+                    <tr key={row._id}>
+                      <td className="px-5 py-4">{row.year} / {row.term}</td>
+                      <td className="px-5 py-4 font-medium text-blue-900">{row.respondent}</td>
+                      <td className="px-5 py-4">{row.question}</td>
+                      <td className="px-5 py-4 text-center"><span className={`px-3 py-1 rounded-lg font-bold ${row.score >= 4 ? 'bg-emerald-100 text-emerald-800' : row.score >= 3 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{row.score}</span></td>
+                      <td className="px-5 py-4 text-center whitespace-nowrap">
+                        <button onClick={() => openEditModal(row.year, row.term, row.respondent)} className="text-blue-500 hover:text-blue-700 mr-3"><Edit className="w-4 h-4"/></button>
+                        <button onClick={() => deleteSingleRecord(row._id)} className="text-rose-500 hover:text-rose-700"><Trash2 className="w-4 h-4"/></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-6 flex justify-between items-center text-sm text-slate-500">
+              <span className="font-medium bg-slate-100 px-3 py-1 rounded-full">แสดง {adminDataList.length > 0 ? (currentPage-1)*itemsPerPage + 1 : 0} ถึง {Math.min(currentPage*itemsPerPage, adminDataList.length)} จาก {adminDataList.length}</span>
+              <div className="flex space-x-2">
+                <button disabled={currentPage===1} onClick={()=>setCurrentPage(c=>c-1)} className="p-1 border rounded hover:bg-slate-50 disabled:opacity-50"><ChevronLeft className="w-5 h-5"/></button>
+                <button disabled={currentPage >= Math.ceil(adminDataList.length/itemsPerPage)} onClick={()=>setCurrentPage(c=>c+1)} className="p-1 border rounded hover:bg-slate-50 disabled:opacity-50"><ChevronRight className="w-5 h-5"/></button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
